@@ -2,16 +2,19 @@
 hotels.py — Hotel recommendation sub-agent (Google ADK)
 
 Responsibilities (per architecture):
-  - Given a trip's venue location, stay dates, and budget/quality
-    preferences, find candidate hotels near the venue and rank them.
-  - If nothing suitable is found near the venue (e.g. sold out on a
-    tournament weekend), widen the search radius rather than silently
-    returning nothing or returning venues far from the action without
-    flagging it.
-  - Returns structured recommendations only. It does NOT book the room,
-    charge a card, send confirmation emails, or touch the calendar —
-    those are orchestrator responsibilities per the confirmation
-    state-machine design.
+  - Given a trip's venue location and first/last scheduled tournament
+    events, search candidate hotels near the venue and rank them.
+  - Derive check-in/check-out from the same event timing flights.py
+    uses (arrive the night before the first event, leave the morning
+    after the last event ends) rather than asking the orchestrator to
+    compute dates separately.
+  - If nothing near the venue fits budget (common on tournament
+    weekends when local hotels sell out or surge in price), widen the
+    search radius rather than silently returning nothing.
+  - Returns structured recommendations only. It does NOT book the
+    room, charge a card, send confirmation emails, or touch the
+    calendar — those are orchestrator responsibilities per the
+    confirmation state-machine design.
 
 This agent is meant to be mounted as a sub_agent of the orchestrator
 agent (see orchestrator.py), which handles session state, the
@@ -19,15 +22,14 @@ agent (see orchestrator.py), which handles session state, the
 writes to `registrations` / `bookings`).
 
 Data layer notes:
-  - `get_trip_requirements` and `search_hotels` are stubbed here.
-    In production, wire them to Firestore (`trips`, `tournaments`
-    collections per the schema discussed) and to whatever hotel data
-    source you're using (a synced dataset or a live search API such as
-    Google Places or Amadeus Hotel Search).
-  - `get_trip_requirements` should prefer the athlete's already-booked
-    flight dates (trip.booking.flight) for check-in/check-out when
-    available, falling back to the tournament's start/end dates plus
-    arrival_buffer_minutes otherwise.
+  - `get_trip_lodging_requirements`, `search_hotels`, and
+    `search_wider_radius` are stubbed here. In production, wire them to
+    Firestore (the same `trips` collection flights.py reads from) and
+    to a real hotel search API (e.g. Booking.com affiliate API,
+    Amadeus Hotel Search) or a synced inventory dataset.
+  - This reads from the same `trips` collection as flights.py — no
+    separate `hotel_trips` table. A trip has one venue location and one
+    event window; both sub-agents derive their own dates/legs from it.
   - Keep these as plain functions decorated as ADK tools — ADK reads
     the function signature + docstring to build the tool schema, so
     keep type hints and docstrings accurate.
@@ -50,27 +52,26 @@ MODEL = "gemini-3.5-flash"
 class HotelOption(BaseModel):
     hotel_id: str
     name: str
+    address: str
     price_per_night: float
-    distance_to_venue_miles: float
-    rating: float = Field(description="Star rating, e.g. 3.5")
+    total_price: float
+    distance_note: str = Field(description="e.g. '0.8 mi from venue'")
     recommendation_note: str = Field(
-        description="Why this hotel fits, given budget, distance, and dates"
+        description="Why this hotel fits, given distance, price, and dates"
     )
 
 
 class HotelRecommendationResponse(BaseModel):
-    search_scope: Literal["near_venue", "expanded_radius"] = Field(
+    search_scope: Literal["near_venue", "wider_radius"] = Field(
         description=(
-            "'expanded_radius' if no suitable hotels were found within the "
-            "normal radius of the venue and the search had to widen"
+            "'wider_radius' if nothing near the venue fit budget, requiring "
+            "a search further from the venue"
         )
     )
-    checkin_date: str
-    checkout_date: str
     within_budget_available: bool = Field(
-        description="Whether at least one returned option meets budget_max"
+        description="Whether at least one option meets budget_per_night"
     )
-    options: list[HotelOption]
+    options: list[HotelOption] = Field(description="Up to 3 ranked options")
     reasoning: str = Field(description="Plain-language summary for the athlete/parent")
 
 
@@ -78,101 +79,102 @@ class HotelRecommendationResponse(BaseModel):
 # Tools
 # ---------------------------------------------------------------------------
 
-def get_trip_requirements(trip_id: str) -> dict:
-    """Fetch venue location, stay dates, and lodging preferences for a trip.
+def get_trip_lodging_requirements(trip_id: str) -> dict:
+    """Fetch venue location, event timing, and lodging budget for a trip.
 
     Args:
         trip_id: Unique identifier for the trip (Firestore doc id under
-            the `trips` collection).
+            the `trips` collection — the same collection flights.py
+            reads from).
 
     Returns:
-        A dict with 'venue_address', 'venue_coords', 'checkin_date',
-        'checkout_date', 'budget_max', and 'hotel_min_stars'.
+        A dict with 'venue_location', 'first_event_datetime',
+        'last_event_end_datetime', 'budget_per_night', and
+        'prefers_near_venue'.
     """
     # TODO: replace with a real Firestore read, e.g.
     #   trip = db.collection("trips").document(trip_id).get().to_dict()
-    # Prefer trip["booking"]["flight"] arrival/departure times for the
-    # check-in/check-out dates when a flight has already been booked.
     return {
-        "venue_address": "Barnes Tennis Center, San Diego, CA",
-        "venue_coords": {"lat": 32.7757, "lng": -117.2264},
-        "checkin_date": "2026-09-28",
-        "checkout_date": "2026-09-30",
-        "budget_max": 180,
-        "hotel_min_stars": 3,
+        "venue_location": "Barnes Tennis Center, San Diego, CA",
+        "first_event_datetime": "2026-09-29T09:00:00",
+        "last_event_end_datetime": "2026-09-30T18:00:00",
+        "budget_per_night": 150,
+        "prefers_near_venue": True,
     }
 
 
 def search_hotels(
-    location: str, checkin_date: str, checkout_date: str, min_rating: float = 0.0
+    location: str, check_in: str, check_out: str, budget_per_night: float
 ) -> list[dict]:
-    """Search for hotels near a location for a given date range.
+    """Search for hotels near a location for a given date range and budget.
 
     Args:
-        location: Address or place name to search near (typically the
-            tournament venue).
-        checkin_date: ISO date, e.g. '2026-09-28'.
-        checkout_date: ISO date, e.g. '2026-09-30'.
-        min_rating: Minimum star rating to include in results.
+        location: Venue or city to search near.
+        check_in: ISO date, e.g. 2026-09-28 — should be the night
+            before first_event_datetime so the athlete isn't traveling
+            the morning of.
+        check_out: ISO date, e.g. 2026-09-30 — should be the morning
+            after last_event_end_datetime.
+        budget_per_night: Max price per night in USD.
 
     Returns:
-        A list of candidate hotel dicts with id, name, price_per_night,
-        distance_to_venue_miles, and rating.
+        A list of candidate hotel dicts with id, name, address,
+        price_per_night, total_price, and distance_note.
     """
-    # TODO: replace with a real query — either a synced hotel dataset or
-    # a live search API (e.g. Google Places, Amadeus Hotel Search).
+    # TODO: replace with a real call to a hotel search API (e.g.
+    # Booking.com affiliate API, Amadeus Hotel Search).
+    nights = 2
     return [
         {
-            "hotel_id": "sd-bayfront-inn",
-            "name": "Bayfront Inn San Diego",
-            "price_per_night": 149.0,
-            "distance_to_venue_miles": 2.1,
-            "rating": 3.5,
+            "hotel_id": "hi-express-sd-1",
+            "name": "Holiday Inn Express San Diego Airport",
+            "address": "1600 Pacific Hwy, San Diego, CA",
+            "price_per_night": 139.0,
+            "total_price": 139.0 * nights,
+            "distance_note": "1.2 mi from Barnes Tennis Center",
         },
         {
-            "hotel_id": "sd-courtyard-airport",
-            "name": "Courtyard San Diego Airport/Liberty Station",
-            "price_per_night": 172.0,
-            "distance_to_venue_miles": 3.4,
-            "rating": 4.0,
-        },
-        {
-            "hotel_id": "sd-luxe-harbor",
-            "name": "Harbor View Suites",
-            "price_per_night": 235.0,
-            "distance_to_venue_miles": 1.2,
-            "rating": 4.5,
+            "hotel_id": "la-quinta-sd-1",
+            "name": "La Quinta Inn San Diego Airport",
+            "address": "1010 Rosecrans St, San Diego, CA",
+            "price_per_night": 119.0,
+            "total_price": 119.0 * nights,
+            "distance_note": "1.6 mi from Barnes Tennis Center",
         },
     ]
 
 
-def search_hotels_expanded_radius(
-    location: str, checkin_date: str, checkout_date: str, radius_miles: int = 20
+def search_wider_radius(
+    location: str, check_in: str, check_out: str, budget_per_night: float, radius_miles: int = 15
 ) -> list[dict]:
-    """Search a wider radius when nothing suitable is found near the venue.
+    """Search for hotels in a wider radius when nothing near the venue fits budget.
 
-    Used when the venue's immediate area is sold out (common on
-    tournament weekends) or has no options meeting minimum quality bars.
+    Used when search_hotels returns nothing within budget_per_night
+    near the venue (common on tournament weekends when local hotels
+    sell out or surge in price).
 
     Args:
-        location: Address or place name to search near (typically the
-            tournament venue).
-        checkin_date: ISO date, e.g. '2026-09-28'.
-        checkout_date: ISO date, e.g. '2026-09-30'.
+        location: Venue or city to search around.
+        check_in: ISO date for check-in.
+        check_out: ISO date for check-out.
+        budget_per_night: Max price per night in USD.
         radius_miles: How far out to widen the search.
 
     Returns:
-        A list of candidate hotel dicts, same shape as search_hotels.
+        A list of candidate hotel dicts, same shape as search_hotels,
+        with distance_note reflecting the greater distance from venue.
     """
-    # TODO: wire to the same data source as search_hotels with a wider
-    # geo radius parameter.
+    # TODO: wire to the same data source as search_hotels, with a
+    # larger radius parameter passed to the underlying API.
+    nights = 2
     return [
         {
-            "hotel_id": "chula-vista-value-inn",
-            "name": "Chula Vista Value Inn",
-            "price_per_night": 118.0,
-            "distance_to_venue_miles": 14.7,
-            "rating": 3.0,
+            "hotel_id": "motel6-sd-1",
+            "name": "Motel 6 San Diego - Mission Valley",
+            "address": "2201 Hotel Cir S, San Diego, CA",
+            "price_per_night": 89.0,
+            "total_price": 89.0 * nights,
+            "distance_note": "6.4 mi from Barnes Tennis Center",
         },
     ]
 
@@ -185,49 +187,41 @@ hotel_agent = Agent(
     name="hotel_agent",
     model=MODEL,
     description=(
-        "Recommends hotels near a tournament venue for a given trip, "
-        "balancing budget, distance to venue, and minimum quality preferences."
+        "Recommends hotels near a tournament venue, balancing distance, "
+        "price, and the trip's event dates."
     ),
     instruction="""
 You are the hotel recommendation agent for an athlete logistics
 assistant. You are called by an orchestrator agent — you never talk to
-the athlete directly and you never book, charge, or confirm a hotel
-reservation.
+the athlete directly and you never book, charge, or confirm a room.
 
 Steps:
-1. Call get_trip_requirements to load the venue location, check-in/
-   check-out dates, budget_max, and hotel_min_stars for this trip.
-2. Call search_hotels using the venue location and the check-in/
-   check-out dates.
-3. Filter and rank the results:
-   - Discard anything below hotel_min_stars unless it is the only
-     option available.
-   - Prefer hotels closer to the venue, especially when the trip's
-     arrival buffer before the first event is tight.
-   - Prefer hotels at or under budget_max. If none qualify, still
-     return the closest-to-budget options and set
-     within_budget_available to false rather than hiding the mismatch.
-4. If search_hotels returns no usable results at all (e.g. the area is
-   sold out for a tournament weekend), call search_hotels_expanded_radius
-   instead, set search_scope to 'expanded_radius', and make sure each
-   recommendation_note explains the longer commute this creates.
-5. Return at most 3 ranked options. Never invent hotels, prices,
-   ratings, or distances that didn't come from a tool call.
+1. Call get_trip_lodging_requirements to load venue_location,
+   first_event_datetime, last_event_end_datetime, budget_per_night,
+   and prefers_near_venue for this trip.
+2. Derive check_in as the calendar date before first_event_datetime
+   (so the athlete isn't traveling the morning of competition) and
+   check_out as the calendar date after last_event_end_datetime.
+3. Call search_hotels with venue_location, the derived check_in/
+   check_out, and budget_per_night.
+4. Rank results primarily by whether they fit budget_per_night, then
+   by distance to the venue, then by price.
+5. If nothing near the venue fits budget_per_night, call
+   search_wider_radius and set search_scope to 'wider_radius'. Call
+   out the added commute tradeoff in recommendation_note when you do
+   this.
+6. Return at most 3 ranked options. Never invent hotels, prices, or
+   addresses that didn't come from a tool call.
 """,
-    tools=[get_trip_requirements, search_hotels, search_hotels_expanded_radius],
+    tools=[get_trip_lodging_requirements, search_hotels, search_wider_radius],
     output_schema=HotelRecommendationResponse,
     output_key="hotel_recommendation",
 )
 
-
-# Exposed for mounting under the orchestrator, e.g.:
-#   from hotels import hotel_agent
-#   orchestrator = Agent(name="orchestrator", sub_agents=[hotel_agent, tournament_agent, ...])
 root_agent = hotel_agent
 
 
 if __name__ == "__main__":
-    # Local smoke test via ADK's Runner + in-memory session service.
     import asyncio
 
     from google.adk.runners import InMemoryRunner
