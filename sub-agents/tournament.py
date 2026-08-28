@@ -1,5 +1,5 @@
 """
-tournaments.py — Tournament recommendation sub-agent (Google ADK)
+tournaments.py: Tournament recommendation sub-agent (Google ADK)
 
 Responsibilities (per architecture):
   - Given a player's ranking + recent match history, find candidate
@@ -8,7 +8,7 @@ Responsibilities (per architecture):
     early-round losses), recommend lower-level events to rebuild
     confidence, or suggest practice matches instead of a tournament.
   - Returns structured recommendations only. It does NOT register the
-    player, send confirmations, email receipts, or touch the calendar —
+    player, send confirmations, email receipts, or touch the calendar,
     those are orchestrator responsibilities per the confirmation
     state-machine design.
 
@@ -22,7 +22,7 @@ Data layer notes:
     In production, wire them to Firestore (`players`, `tournaments`
     collections per the schema discussed) and to whatever tournament
     data source you're using (scraped feed or an official API).
-  - Keep these as plain functions decorated as ADK tools — ADK reads
+  - Keep these as plain functions decorated as ADK tools. ADK reads
     the function signature + docstring to build the tool schema, so
     keep type hints and docstrings accurate.
 """
