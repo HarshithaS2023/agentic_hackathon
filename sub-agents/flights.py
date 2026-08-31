@@ -39,12 +39,19 @@ Data layer notes:
 
 from __future__ import annotations
 
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Literal, Optional
 
 from google.adk.agents import Agent
 from pydantic import BaseModel, Field
 
-MODEL = "gemini-3.5-flash"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import data_store
+
+MODEL = "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +111,20 @@ def get_trip_requirements(trip_id: str) -> dict:
         'arrival_buffer_minutes', 'budget_max', and
         'departure_flexibility_hours'.
     """
-    # TODO: replace with a real Firestore read, e.g.
+    trip = data_store.get_trip(trip_id)
+    if trip:
+        return {
+            "origin_airport": trip["origin_airport"],
+            "destination_airport": trip["destination_airport"],
+            "first_event_datetime": trip["first_event_datetime"],
+            "last_event_end_datetime": trip["last_event_end_datetime"],
+            "arrival_buffer_minutes": trip.get("arrival_buffer_minutes", 180),
+            "budget_max": trip.get("budget_max", 450),
+            "departure_flexibility_hours": trip.get("departure_flexibility_hours", 6),
+        }
+    # Fallback for a trip_id that isn't in the store (e.g. the __main__
+    # smoke test below) — TODO: replace with a real Firestore read once
+    # trips move off the local store, e.g.
     #   trip = db.collection("trips").document(trip_id).get().to_dict()
     return {
         "origin_airport": "SAN",
@@ -146,32 +166,35 @@ def search_flights(
     """
     # TODO: replace with a real query against a flight search API
     # (e.g. Amadeus, Duffel, Skyscanner) or a synced fare dataset.
-    return [
-        {
-            "flight_id": "aa-1423",
-            "airline": "American Airlines",
-            "price": 214.0,
-            "depart_time": "2026-09-28T14:10:00",
-            "arrive_time": "2026-09-28T15:35:00",
-            "layovers": 0,
-        },
-        {
-            "flight_id": "dl-889",
-            "airline": "Delta",
-            "price": 268.0,
-            "depart_time": "2026-09-28T07:05:00",
-            "arrive_time": "2026-09-28T08:32:00",
-            "layovers": 0,
-        },
-        {
-            "flight_id": "ua-4410",
-            "airline": "United",
-            "price": 189.0,
-            "depart_time": "2026-09-28T11:20:00",
-            "arrive_time": "2026-09-28T14:55:00",
-            "layovers": 1,
-        },
+    #
+    # Candidate times are generated as offsets from earliest_datetime rather
+    # than hardcoded absolute dates, so this mock stays coherent no matter
+    # which trip it's asked about — a fixed date would silently mismatch
+    # every event window except the one it was written for.
+    try:
+        base = datetime.fromisoformat(earliest_datetime)
+    except (ValueError, TypeError):
+        base = datetime.now()
+    candidates = [
+        ("aa-1423", "American Airlines", 214.0, 30, 85, 0),
+        ("dl-889", "Delta", 268.0, -420, 87, 0),
+        ("ua-4410", "United", 189.0, -120, 215, 1),
     ]
+    results = []
+    for flight_id, airline, price, offset_minutes, duration_minutes, layovers in candidates:
+        depart = base + timedelta(minutes=offset_minutes)
+        arrive = depart + timedelta(minutes=duration_minutes)
+        results.append(
+            {
+                "flight_id": flight_id,
+                "airline": airline,
+                "price": price,
+                "depart_time": depart.isoformat(),
+                "arrive_time": arrive.isoformat(),
+                "layovers": layovers,
+            }
+        )
+    return results
 
 
 def search_alternate_airports(
@@ -200,13 +223,19 @@ def search_alternate_airports(
     # TODO: wire to the same data source as search_flights, querying a
     # secondary airport code (e.g. BUR or LGB instead of LAX) near the
     # requested metro.
+    try:
+        base = datetime.fromisoformat(earliest_datetime)
+    except (ValueError, TypeError):
+        base = datetime.now()
+    depart = base - timedelta(minutes=45)
+    arrive = depart + timedelta(minutes=85)
     return [
         {
             "flight_id": "wn-2210",
             "airline": "Southwest",
             "price": 176.0,
-            "depart_time": "2026-09-28T09:15:00",
-            "arrive_time": "2026-09-28T10:40:00",
+            "depart_time": depart.isoformat(),
+            "arrive_time": arrive.isoformat(),
             "layovers": 0,
             "arrival_airport": "BUR",
         },

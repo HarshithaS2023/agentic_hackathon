@@ -34,7 +34,7 @@ export default function TournamentsView({ tournaments, flights, hotels }) {
             <span className="trip-date mono">{t.date || '—'}</span>
             <span className="trip-body">
               <span className="trip-name">{t.name || 'Untitled'}</span>
-              <span className="trip-meta">{[t.level, t.location].filter(Boolean).join(' · ')}</span>
+              <span className="trip-meta">{[t.sport, t.level, t.location].filter(Boolean).join(' · ')}</span>
             </span>
             {t.source_url && (
               <a className="trip-link" href={t.source_url} target="_blank" rel="noreferrer">

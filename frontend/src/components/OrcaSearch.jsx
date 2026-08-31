@@ -9,25 +9,37 @@ const KINDS = [
 ]
 
 const FIELDS = {
-  tournaments: { a: ['Location', 'San Diego, CA'], b: ['Level', 'Futures'] },
-  flights: { a: ['Destination', 'Tenerife (TFS)'], b: ['Departing from', 'San Diego (SAN)'] },
-  hotels: { a: ['Location', 'Near the venue'], b: ['Dates', 'Mar 3–9'] },
+  tournaments: [
+    { key: 'sport', label: 'Sport', placeholder: 'Tennis' },
+    { key: 'location', label: 'Location', placeholder: 'San Diego, CA' },
+    { key: 'level', label: 'Level', placeholder: 'Futures' },
+  ],
+  flights: [
+    { key: 'tournament', label: 'Tournament', placeholder: 'e.g. San Diego Open' },
+    { key: 'origin', label: 'Departing from', placeholder: 'San Diego (SAN)' },
+  ],
+  hotels: [{ key: 'tournament', label: 'Tournament', placeholder: 'e.g. San Diego Open' }],
 }
 
+// Which field must be filled in before a search can run, per kind.
+const REQUIRED_KEY = { tournaments: 'location', flights: 'tournament', hotels: 'tournament' }
+
+// tournaments' phrases are a function of the sport being searched, since
+// the search itself is no longer tennis-only.
 const PHRASES = {
-  tournaments: [
-    'Searching usta.com…',
-    'Checking regional tennis associations…',
+  tournaments: (sport) => [
+    `Searching for ${sport} tournaments…`,
+    `Checking regional ${sport} associations…`,
     'Cross-referencing tournament dates…',
     'Reading tournament listings…',
   ],
-  flights: [
+  flights: () => [
     'Querying airline availability…',
     'Comparing routes and layovers…',
     'Scanning fare calendars…',
     'Ranking by price and timing…',
   ],
-  hotels: [
+  hotels: () => [
     'Scanning nearby stays…',
     'Filtering by distance to the venue…',
     'Checking rates and availability…',
@@ -35,8 +47,8 @@ const PHRASES = {
   ],
 }
 
-function Thinking({ kind }) {
-  const list = PHRASES[kind]
+function Thinking({ kind, sport }) {
+  const list = PHRASES[kind](sport)
   const [phrase, setPhrase] = useState(list[0])
   useEffect(() => {
     let i = 0
@@ -64,27 +76,35 @@ function Thinking({ kind }) {
 
 export default function OrcaSearch({ onReloadTrips }) {
   const [kind, setKind] = useState('tournaments')
-  const [a, setA] = useState('')
-  const [b, setB] = useState('')
+  const [values, setValues] = useState({})
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
 
   const fields = FIELDS[kind]
+  const setValue = (key, val) => setValues((v) => ({ ...v, [key]: val }))
 
   async function run(e) {
     e.preventDefault()
-    if (!a.trim() || loading) return
+    const requiredValue = (values[REQUIRED_KEY[kind]] || '').trim()
+    if (!requiredValue || loading) return
     setLoading(true)
     setResult(null)
     try {
-      const data = await orcaSearch({ kind, location: a.trim(), level: b.trim() })
+      const data = await orcaSearch({
+        kind,
+        sport: (values.sport || '').trim(),
+        location: (values.location || '').trim(),
+        level: (values.level || '').trim(),
+        tournament: (values.tournament || '').trim(),
+        origin: (values.origin || '').trim(),
+      })
       const rows = data.results || data.tournaments || []
       setResult({
         summary: `Found ${rows.length} ${rows.length === 1 ? 'match' : 'matches'}${data.summary ? ` — ${data.summary}` : ''}`,
         queries: data.search_queries_used || [],
         rows,
       })
-      if (kind === 'tournaments') await onReloadTrips()
+      await onReloadTrips()
     } catch {
       setResult({ summary: 'Search failed — try again.', queries: [], rows: [] })
     } finally {
@@ -121,20 +141,23 @@ export default function OrcaSearch({ onReloadTrips }) {
       </div>
 
       <form onSubmit={run}>
-        <div className="field">
-          <label>{fields.a[0]}</label>
-          <input type="text" placeholder={fields.a[1]} value={a} onChange={(e) => setA(e.target.value)} />
-        </div>
-        <div className="field">
-          <label>{fields.b[0]}</label>
-          <input type="text" placeholder={fields.b[1]} value={b} onChange={(e) => setB(e.target.value)} />
-        </div>
+        {fields.map((f) => (
+          <div className="field" key={f.key}>
+            <label>{f.label}</label>
+            <input
+              type="text"
+              placeholder={f.placeholder}
+              value={values[f.key] || ''}
+              onChange={(e) => setValue(f.key, e.target.value)}
+            />
+          </div>
+        ))}
         <button type="submit" className="btn btn-primary btn-full" disabled={loading}>
           {loading ? 'Searching…' : `Search ${KINDS.find((k) => k.id === kind).label.toLowerCase()}`}
         </button>
       </form>
 
-      {loading && <Thinking kind={kind} />}
+      {loading && <Thinking kind={kind} sport={(values.sport || '').trim() || 'tennis'} />}
 
       {!loading && result && (
         <div className="orca-result">
@@ -146,7 +169,7 @@ export default function OrcaSearch({ onReloadTrips }) {
               <span className="orca-row-body">
                 <span className="orca-row-name">{r.name || r.title || 'Result'}</span>
                 <span className="orca-row-meta">
-                  {[r.level, r.location, r.price].filter(Boolean).join(' · ')}
+                  {[r.sport, r.level, r.location, r.price].filter(Boolean).join(' · ')}
                 </span>
               </span>
               {r.source_url && (

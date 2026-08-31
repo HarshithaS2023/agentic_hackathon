@@ -38,40 +38,21 @@ mixed into the search_step either, for the same reason as above.
 from __future__ import annotations
 
 import datetime as dt
+import sys
 import uuid
+from pathlib import Path
 from typing import Literal
 
 from google.adk.agents import Agent, SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools import google_search
-from google.cloud import firestore
 from pydantic import BaseModel, Field
 
-MODEL = "gemini-3.5-flash"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# TODO: credentials. get_firestore_client() below authenticates via
-# Application Default Credentials (ADC) — e.g. `gcloud auth application-
-# default login` locally, or the attached service account when running on
-# Cloud Run. No API key is needed for Firestore itself, but if a real
-# tournament API/search key gets wired in alongside this later, load it
-# from an environment variable (e.g. os.environ["TOURNAMENT_API_KEY"]) —
-# never hardcode it here.
+import data_store
 
-_db: firestore.Client | None = None
-
-
-def get_firestore_client() -> firestore.Client:
-    """Lazily create the Firestore client on first use.
-
-    Deliberately not instantiated at module import time — doing so would
-    make `import tournament_search_agent` fail for anyone (including in
-    local dev) before ADC/credentials are configured, even if they never
-    actually trigger a search.
-    """
-    global _db
-    if _db is None:
-        _db = firestore.Client()
-    return _db
+MODEL = "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +61,7 @@ def get_firestore_client() -> firestore.Client:
 
 class GroundedTournamentResult(BaseModel):
     name: str
+    sport: str = Field(description="e.g. 'Tennis', 'Pickleball', 'Basketball'")
     level: str = Field(description="e.g. 'Futures', 'Challenger', 'Local Open', if known")
     date: str = Field(description="ISO date if known, otherwise best available date text")
     location: str
@@ -107,15 +89,16 @@ search_step = Agent(
     description="Runs a live Google Search for current real tournaments matching the player's criteria.",
     instruction="""
 You are triggered by a player who is actively looking at their
-dashboard right now and asked to find tournaments. Use google_search
-to find real, currently-listed tournaments matching their location
-preference and level.
+dashboard right now and asked to find tournaments. The request names a
+sport (e.g. tennis, pickleball) plus optionally a location preference
+and level — use google_search to find real, currently-listed
+tournaments matching all of that criteria.
 
 Write a plain-text summary of what you found. For each tournament,
-include: name, level (if stated), date, location, and the URL you
-found it on. If you are not confident about a specific date or level,
-say so explicitly rather than guessing. Do not invent tournaments —
-only report what search results actually show.
+include: sport, name, level (if stated), date, location, and the URL
+you found it on. If you are not confident about a specific date or
+level, say so explicitly rather than guessing. Do not invent
+tournaments — only report what search results actually show.
 """,
     tools=[google_search],
     output_key="raw_search_findings",
@@ -172,21 +155,20 @@ def persist_search_results(callback_context: CallbackContext) -> None:
 
     results = output.get("results", [])
     now = dt.datetime.now(dt.timezone.utc)
-    db = get_firestore_client()
 
-    # Upsert each result into the shared `tournaments` collection.
-    # tournaments.py's search_tournaments tool reads from this collection —
+    # Upsert each result into the shared tournaments store.
+    # tournament.py's search_tournaments tool reads from this same store —
     # this is what turns a one-time dashboard search into data the SMS
     # agent can recommend from all week.
-    batch = db.batch()
+    docs = []
     for result in results:
         doc_id = _tournament_doc_id(result)
-        doc_ref = db.collection("tournaments").document(doc_id)
-        batch.set(
-            doc_ref,
+        docs.append(
             {
                 "tournament_id": doc_id,
+                "id": doc_id,
                 "name": result["name"],
+                "sport": result["sport"],
                 "level": result["level"],
                 "date": result["date"],
                 "location": result["location"],
@@ -194,16 +176,15 @@ def persist_search_results(callback_context: CallbackContext) -> None:
                 "confidence": result["confidence"],
                 "discovered_via": "google_search_grounding",
                 "last_seen_at": now.isoformat(),
-            },
-            merge=True,
+            }
         )
-    if results:
-        batch.commit()
+    if docs:
+        data_store.add_tournaments(docs)
 
     # Append the search_history record — the compliance audit trail
     # confirming a human was present at the dashboard when this grounded
     # search ran (see the module docstring for why that matters).
-    db.collection("search_history").add(
+    data_store.add_search_history(
         {
             "user_id": callback_context.user_id,
             "queries": output.get("search_queries_used", []),

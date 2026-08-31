@@ -31,7 +31,9 @@ calls, per the schema:
 from __future__ import annotations
 
 import datetime as dt
+import sys
 import uuid
+from pathlib import Path
 from typing import Literal
 
 from google.adk.agents import Agent
@@ -39,27 +41,14 @@ from google.adk.tools import ToolContext
 from google.adk.tools.agent_tool import AgentTool
 from pydantic import BaseModel
 
-from tournaments import tournament_agent
+sys.path.insert(0, str(Path(__file__).parent / "sub-agents"))
 
-# hotel_agent / flight_agent follow the same shape as tournament_agent
-# (see tournaments.py). Swap these placeholders for the real imports
-# once built, e.g.:
-#   from hotels import hotel_agent
-#   from flights import flight_agent
-hotel_agent = Agent(
-    name="hotel_agent",
-    model="gemini-2.5-flash",
-    description="Searches hotel options near a tournament location and date range.",
-    instruction="Search for hotel options given location, check_in, and check_out. Return structured options only — do not book anything.",
-)
-flight_agent = Agent(
-    name="flight_agent",
-    model="gemini-2.5-flash",
-    description="Searches flight options for a tournament trip.",
-    instruction="Search for flight options given origin, destination, and dates. Return structured options only — do not book anything.",
-)
+import data_store
+from tournament import tournament_agent
+from hotels import hotel_agent
+from flights import flight_agent
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.6-flash"
 CONFIRMATION_TTL_MINUTES = 30
 
 
@@ -196,6 +185,18 @@ def register_player_for_tournament(
         "email_receipt_sent": email_sent,
         "reminder_sent": False,
     }
+    data_store.add_booking(
+        {
+            "id": registration_id,
+            "user_id": user_id,
+            "type": "tournament",
+            "title": tournament_name,
+            "date": date,
+            "location": location,
+            "status": "confirmed",
+            "confirmation": registration_id[:8],
+        }
+    )
     return record
 
 

@@ -46,29 +46,18 @@ Data layer notes:
 from __future__ import annotations
 
 import datetime as dt
+import sys
+from pathlib import Path
 from typing import Literal
 
 from google.adk.agents import Agent
-from google.cloud import firestore
 from pydantic import BaseModel, Field
 
-MODEL = "gemini-3.5-flash"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# TODO: credentials. get_firestore_client() below authenticates via
-# Application Default Credentials (ADC) — e.g. `gcloud auth application-
-# default login` locally, or the attached service account when running on
-# Cloud Run. No API key needed for Firestore itself.
+import data_store
 
-_db: firestore.Client | None = None
-
-
-def get_firestore_client() -> firestore.Client:
-    """Lazily create the Firestore client on first use, so importing this
-    module doesn't require credentials to already be configured."""
-    global _db
-    if _db is None:
-        _db = firestore.Client()
-    return _db
+MODEL = "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -149,31 +138,23 @@ def search_tournaments(location: str, level: str, date_range_days: int = 60) -> 
         A list of candidate tournament dicts with id, name, level,
         date, and location.
     """
-    db = get_firestore_client()
     cutoff_date = (dt.date.today() + dt.timedelta(days=date_range_days)).isoformat()
     today = dt.date.today().isoformat()
+    location_lower = location.lower()
 
-    query = (
-        db.collection("tournaments")
-        .where("level", "==", level)
-        .where("date", ">=", today)
-        .where("date", "<=", cutoff_date)
-        .order_by("date")
-        .limit(10)
-    )
-    docs = list(query.stream())
-
-    # Location is filtered in Python rather than as a Firestore equality
+    # Location is filtered as a substring match rather than an exact-match
     # clause, since tournament location strings are free text (e.g.
     # "Barnes Tennis Center, San Diego, CA") and a substring/region match
-    # is more useful than an exact-match Firestore query here.
-    location_lower = location.lower()
+    # is more useful here.
     results = [
-        d.to_dict()
-        for d in docs
-        if location_lower in d.to_dict().get("location", "").lower()
+        t
+        for t in data_store.list_tournaments()
+        if t.get("level") == level
+        and today <= t.get("date", "") <= cutoff_date
+        and location_lower in t.get("location", "").lower()
     ]
-    return results
+    results.sort(key=lambda t: t.get("date", ""))
+    return results[:10]
 
 
 def search_wider_date_range(location: str, level: str, date_range_days: int = 120) -> list[dict]:

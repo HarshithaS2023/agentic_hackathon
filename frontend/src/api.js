@@ -42,12 +42,15 @@ export function getHotels() {
 // ORCA Search — the orchestrator's discovery step. `kind` is one of
 // 'tournaments' | 'flights' | 'hotels'. Only the tournaments endpoint exists
 // today; kind is passed through for when flights/hotels search lands.
-export function orcaSearch({ kind, location, level }) {
+export function orcaSearch({ kind, sport, location, level, tournament, origin }) {
   return postJSON('/api/dashboard/search-tournaments', {
     user_id: USER_ID,
     kind,
+    sport,
     location,
     level,
+    tournament,
+    origin,
   })
 }
 

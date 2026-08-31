@@ -37,12 +37,18 @@ Data layer notes:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Literal
 
 from google.adk.agents import Agent
 from pydantic import BaseModel, Field
 
-MODEL = "gemini-3.5-flash"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import data_store
+
+MODEL = "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +98,18 @@ def get_trip_lodging_requirements(trip_id: str) -> dict:
         'last_event_end_datetime', 'budget_per_night', and
         'prefers_near_venue'.
     """
-    # TODO: replace with a real Firestore read, e.g.
+    trip = data_store.get_trip(trip_id)
+    if trip:
+        return {
+            "venue_location": trip["venue_location"],
+            "first_event_datetime": trip["first_event_datetime"],
+            "last_event_end_datetime": trip["last_event_end_datetime"],
+            "budget_per_night": trip.get("budget_per_night", 150),
+            "prefers_near_venue": trip.get("prefers_near_venue", True),
+        }
+    # Fallback for a trip_id that isn't in the store (e.g. the __main__
+    # smoke test below) — TODO: replace with a real Firestore read once
+    # trips move off the local store, e.g.
     #   trip = db.collection("trips").document(trip_id).get().to_dict()
     return {
         "venue_location": "Barnes Tennis Center, San Diego, CA",
