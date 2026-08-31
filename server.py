@@ -21,6 +21,7 @@ import asyncio
 import datetime as dt
 import re
 import sys
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -38,8 +39,26 @@ from orchestrator import orchestrator
 
 app = Flask(__name__)
 
+# The ADK runners are async; Flask handlers are sync. Rather than spin up a
+# fresh event loop per request (which loses InMemoryRunner session state and
+# breaks loop-bound async primitives), we run one persistent loop on its own
+# thread and hand coroutines to it. This keeps the dev server safe to run
+# threaded, so a slow LLM call doesn't block the dashboard's polling.
 _loop = asyncio.new_event_loop()
-asyncio.set_event_loop(_loop)
+threading.Thread(target=_loop.run_forever, name="orca-agent-loop", daemon=True).start()
+
+
+_AGENT_TIMEOUT_S = 180  # cap a wedged agent call instead of pinning a worker forever
+
+
+def _run_coro(coro):
+    """Block the calling request thread until `coro` finishes on the agent loop.
+
+    Raises TimeoutError past _AGENT_TIMEOUT_S — the routes catch it and return a
+    friendly failure reply rather than hanging the request.
+    """
+    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=_AGENT_TIMEOUT_S)
+
 
 CHAT_APP_NAME = "orca_chat"
 _chat_runner = InMemoryRunner(agent=orchestrator, app_name=CHAT_APP_NAME)
@@ -48,7 +67,7 @@ _chat_sessions: dict[str, str] = {}  # user_id -> session_id
 
 def _chat_session_id(user_id: str) -> str:
     if user_id not in _chat_sessions:
-        session = _loop.run_until_complete(
+        session = _run_coro(
             _chat_runner.session_service.create_session(app_name=CHAT_APP_NAME, user_id=user_id)
         )
         _chat_sessions[user_id] = session.id
@@ -70,7 +89,7 @@ def _run_chat(user_id: str, message: str) -> str:
                         reply_parts.append(part.text)
         return "".join(reply_parts)
 
-    return _loop.run_until_complete(_run())
+    return _run_coro(_run())
 
 
 def _run_tournament_search(user_id: str, sport: str, location: str, level: str) -> dict:
@@ -99,7 +118,7 @@ def _run_tournament_search(user_id: str, sport: str, location: str, level: str) 
         )
         return final.state.get("grounded_search_results") or {}
 
-    return _loop.run_until_complete(_run())
+    return _run_coro(_run())
 
 
 def _find_tournament(name: str) -> dict | None:
@@ -165,7 +184,7 @@ def _run_flight_search(user_id: str, tournament: dict, origin: str) -> tuple[lis
         )
         return final.state.get("flight_recommendation") or {}
 
-    output = _loop.run_until_complete(_run())
+    output = _run_coro(_run())
 
     rows = []
     for leg in output.get("options", []):
@@ -225,7 +244,7 @@ def _run_hotel_search(user_id: str, tournament: dict) -> tuple[list[dict], str]:
         )
         return final.state.get("hotel_recommendation") or {}
 
-    output = _loop.run_until_complete(_run())
+    output = _run_coro(_run())
 
     rows = []
     for opt in output.get("options", []):
@@ -380,4 +399,12 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("FLASK_PORT", 8080))
     host = os.environ.get("FLASK_HOST", "0.0.0.0")
-    app.run(host=host, port=port, debug=os.environ.get("FLASK_ENV") == "development")
+    # threaded=True so the dashboard's parallel GETs (and a second tab) aren't
+    # serialized behind a slow agent call — safe now that all async work is
+    # marshalled onto the dedicated _loop thread via _run_coro().
+    app.run(
+        host=host,
+        port=port,
+        debug=os.environ.get("FLASK_ENV") == "development",
+        threaded=True,
+    )
