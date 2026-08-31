@@ -1,5 +1,5 @@
 """
-tournaments.py: Tournament recommendation sub-agent (Google ADK)
+tournaments.py — Tournament recommendation sub-agent (Google ADK)
 
 Responsibilities (per architecture):
   - Given a player's ranking + recent match history, find candidate
@@ -7,8 +7,12 @@ Responsibilities (per architecture):
   - If the player has been performing poorly (recent losses, especially
     early-round losses), recommend lower-level events to rebuild
     confidence, or suggest practice matches instead of a tournament.
+  - If nothing fits within the initial search window (60 days), widen
+    the date range rather than silently returning nothing — mirrors
+    the fallback pattern in hotels.py (search_wider_radius) and
+    flights.py (search_alternate_airports).
   - Returns structured recommendations only. It does NOT register the
-    player, send confirmations, email receipts, or touch the calendar,
+    player, send confirmations, email receipts, or touch the calendar —
     those are orchestrator responsibilities per the confirmation
     state-machine design.
 
@@ -17,12 +21,20 @@ agent (see orchestrator.py), which handles session state, the
 "Type YES to confirm" flow, and side effects (email, calendar, Firestore
 writes to `registrations`).
 
+Note on trip_id: unlike hotels.py/flights.py, this agent is keyed on
+player_id, not trip_id. It's the one agent that produces the
+information a trip is built from — the orchestrator is expected to
+create a `trips` record from the chosen recommendation, which
+hotels.py and flights.py then read from. This is intentional, not an
+inconsistency to fix.
+
 Data layer notes:
-  - `get_player_profile` and `search_tournaments` are stubbed here.
-    In production, wire them to Firestore (`players`, `tournaments`
-    collections per the schema discussed) and to whatever tournament
-    data source you're using (scraped feed or an official API).
-  - Keep these as plain functions decorated as ADK tools. ADK reads
+  - `get_player_profile`, `search_tournaments`, and
+    `search_wider_date_range` are stubbed here. In production, wire
+    them to Firestore (`players`, `tournaments` collections per the
+    schema discussed) and to whatever tournament data source you're
+    using (scraped feed or an official API).
+  - Keep these as plain functions decorated as ADK tools — ADK reads
     the function signature + docstring to build the tool schema, so
     keep type hints and docstrings accurate.
 """
@@ -34,7 +46,7 @@ from typing import Literal
 from google.adk.agents import Agent
 from pydantic import BaseModel, Field
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.5-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +59,7 @@ class TournamentRecommendation(BaseModel):
     level: str = Field(description="e.g. 'Challenger', 'Futures', 'Local Open'")
     date: str = Field(description="ISO date, e.g. 2026-09-29")
     location: str
-    confidence_note: str = Field(
+    recommendation_note: str = Field(
         description="Why this was recommended given the player's recent form"
     )
 
@@ -57,6 +69,12 @@ class TournamentRecommendationResponse(BaseModel):
         description=(
             "'practice_match' if recent performance suggests the player "
             "should rebuild form before entering a sanctioned tournament"
+        )
+    )
+    search_scope: Literal["initial_window", "extended_window"] = Field(
+        description=(
+            "'extended_window' if nothing fit within the initial 60-day "
+            "search, requiring a wider date range"
         )
     )
     recommendations: list[TournamentRecommendation]
@@ -125,6 +143,35 @@ def search_tournaments(location: str, level: str, date_range_days: int = 60) -> 
     ]
 
 
+def search_wider_date_range(location: str, level: str, date_range_days: int = 120) -> list[dict]:
+    """Search for tournaments over a wider date range.
+
+    Used when search_tournaments returns nothing within the initial
+    60-day window — common for less common levels/locations where
+    events are sparser.
+
+    Args:
+        location: City/region to search near.
+        level: Target competition level.
+        date_range_days: Widened search horizon, in days.
+
+    Returns:
+        A list of candidate tournament dicts, same shape as
+        search_tournaments.
+    """
+    # TODO: wire to the same data source as search_tournaments, with a
+    # larger date_range_days passed through to the underlying query.
+    return [
+        {
+            "tournament_id": "desert-classic-2026-12",
+            "name": "Desert Classic",
+            "level": "Futures",
+            "date": "2026-12-05",
+            "location": "Palm Springs, CA",
+        },
+    ]
+
+
 def find_practice_matches(location: str) -> list[dict]:
     """Find informal practice-match opportunities near a location.
 
@@ -173,14 +220,18 @@ Steps:
      current level.
 3. Call search_tournaments with the chosen level and the player's
    location preference. If recommending practice instead, call
-   find_practice_matches instead.
-4. Return a TournamentRecommendationResponse. Keep confidence_note and
-   reasoning concrete and specific to the player's actual results —
+   find_practice_matches instead and skip the remaining steps.
+4. If search_tournaments returns nothing, call search_wider_date_range
+   with the same level/location and set search_scope to
+   'extended_window'. Call out the longer wait in recommendation_note
+   when you do this.
+5. Return a TournamentRecommendationResponse. Keep recommendation_note
+   and reasoning concrete and specific to the player's actual results —
    never generic filler text.
 
 Never invent tournaments or dates that didn't come from a tool call.
 """,
-    tools=[get_player_profile, search_tournaments, find_practice_matches],
+    tools=[get_player_profile, search_tournaments, search_wider_date_range, find_practice_matches],
     output_schema=TournamentRecommendationResponse,
     output_key="tournament_recommendation",
 )
