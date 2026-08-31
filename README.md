@@ -7,6 +7,14 @@ time and within budget. A dashboard shows the season's schedule alongside
 booked flights/hotels, and a chat surface handles the "type YES to confirm"
 booking flow.
 
+<img width="1449" height="767" alt="image" src="https://github.com/user-attachments/assets/5831dcba-3720-4155-9cce-e04065e1958b" />
+
+<img width="1141" height="680" alt="image" src="https://github.com/user-attachments/assets/ba2f6290-1221-4e64-a9aa-dce434aa6590" />
+
+<img width="1099" height="737" alt="image" src="https://github.com/user-attachments/assets/b94fa2fd-0221-453a-be93-661b9530e60b" />
+
+
+
 ## How it's built
 
 - **Orchestrator agent** ([orchestrator.py](orchestrator.py)) — a Google ADK
