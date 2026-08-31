@@ -29,11 +29,15 @@ hotels.py and flights.py then read from. This is intentional, not an
 inconsistency to fix.
 
 Data layer notes:
-  - `get_player_profile`, `search_tournaments`, and
-    `search_wider_date_range` are stubbed here. In production, wire
-    them to Firestore (`players`, `tournaments` collections per the
-    schema discussed) and to whatever tournament data source you're
-    using (scraped feed or an official API).
+  - `get_player_profile` is still stubbed — wire it to Firestore
+    (`players` collection) when ready.
+  - `search_tournaments` and `search_wider_date_range` read from the
+    shared `tournaments` Firestore collection, which is populated by
+    tournament_search_agent.py's dashboard-triggered Google Search
+    grounding pipeline (see that file for why discovery happens there
+    and not here — USTA/TennisLink prohibit scraping in their terms,
+    so this agent never fetches tournament data itself; it only reads
+    what's already been discovered and persisted).
   - Keep these as plain functions decorated as ADK tools — ADK reads
     the function signature + docstring to build the tool schema, so
     keep type hints and docstrings accurate.
@@ -41,12 +45,30 @@ Data layer notes:
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Literal
 
 from google.adk.agents import Agent
+from google.cloud import firestore
 from pydantic import BaseModel, Field
 
 MODEL = "gemini-3.5-flash"
+
+# TODO: credentials. get_firestore_client() below authenticates via
+# Application Default Credentials (ADC) — e.g. `gcloud auth application-
+# default login` locally, or the attached service account when running on
+# Cloud Run. No API key needed for Firestore itself.
+
+_db: firestore.Client | None = None
+
+
+def get_firestore_client() -> firestore.Client:
+    """Lazily create the Firestore client on first use, so importing this
+    module doesn't require credentials to already be configured."""
+    global _db
+    if _db is None:
+        _db = firestore.Client()
+    return _db
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +134,11 @@ def get_player_profile(player_id: str) -> dict:
 def search_tournaments(location: str, level: str, date_range_days: int = 60) -> list[dict]:
     """Search for upcoming tournaments matching a location and level.
 
+    Reads from the shared `tournaments` Firestore collection — the same
+    collection tournament_search_agent.py's dashboard-triggered pipeline
+    writes into. This function never calls a live search or scraper
+    itself; it only queries what's already been discovered and persisted.
+
     Args:
         location: City/region to search near.
         level: Target competition level (e.g. 'Futures', 'Challenger',
@@ -122,25 +149,31 @@ def search_tournaments(location: str, level: str, date_range_days: int = 60) -> 
         A list of candidate tournament dicts with id, name, level,
         date, and location.
     """
-    # TODO: replace with a real query against your synced `tournaments`
-    # collection (populated by a periodic scrape/API sync job, not
-    # queried live from an external source on every call).
-    return [
-        {
-            "tournament_id": "sd-open-2026-09",
-            "name": "San Diego Open",
-            "level": "Futures",
-            "date": "2026-09-29",
-            "location": "Barnes Tennis Center, San Diego, CA",
-        },
-        {
-            "tournament_id": "socal-challenger-2026-10",
-            "name": "SoCal Challenger",
-            "level": "Challenger",
-            "date": "2026-10-14",
-            "location": "Carson, CA",
-        },
+    db = get_firestore_client()
+    cutoff_date = (dt.date.today() + dt.timedelta(days=date_range_days)).isoformat()
+    today = dt.date.today().isoformat()
+
+    query = (
+        db.collection("tournaments")
+        .where("level", "==", level)
+        .where("date", ">=", today)
+        .where("date", "<=", cutoff_date)
+        .order_by("date")
+        .limit(10)
+    )
+    docs = list(query.stream())
+
+    # Location is filtered in Python rather than as a Firestore equality
+    # clause, since tournament location strings are free text (e.g.
+    # "Barnes Tennis Center, San Diego, CA") and a substring/region match
+    # is more useful than an exact-match Firestore query here.
+    location_lower = location.lower()
+    results = [
+        d.to_dict()
+        for d in docs
+        if location_lower in d.to_dict().get("location", "").lower()
     ]
+    return results
 
 
 def search_wider_date_range(location: str, level: str, date_range_days: int = 120) -> list[dict]:
@@ -148,7 +181,7 @@ def search_wider_date_range(location: str, level: str, date_range_days: int = 12
 
     Used when search_tournaments returns nothing within the initial
     60-day window — common for less common levels/locations where
-    events are sparser.
+    events are sparser. Same Firestore collection, wider date filter.
 
     Args:
         location: City/region to search near.
@@ -159,17 +192,7 @@ def search_wider_date_range(location: str, level: str, date_range_days: int = 12
         A list of candidate tournament dicts, same shape as
         search_tournaments.
     """
-    # TODO: wire to the same data source as search_tournaments, with a
-    # larger date_range_days passed through to the underlying query.
-    return [
-        {
-            "tournament_id": "desert-classic-2026-12",
-            "name": "Desert Classic",
-            "level": "Futures",
-            "date": "2026-12-05",
-            "location": "Palm Springs, CA",
-        },
-    ]
+    return search_tournaments(location, level, date_range_days=date_range_days)
 
 
 def find_practice_matches(location: str) -> list[dict]:
