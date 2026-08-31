@@ -23,6 +23,7 @@ _PATH = Path(__file__).parent / "data" / "local_store.json"
 _LOCK = threading.Lock()
 
 _DEFAULT = {
+    "players": [],
     "tournaments": [],
     "flights": [],
     "hotels": [],
@@ -30,6 +31,21 @@ _DEFAULT = {
     "bookings": [],
     "search_history": [],
     "trips": [],
+}
+
+# Returned by get_player() for an id that isn't in the store yet (e.g. the
+# demo player, or an ADK smoke test). Mirrors the get_trip() fallbacks the
+# flight/hotel agents use so the full recommendation flow still exercises
+# without a provisioned `players` collection.
+_DEMO_PLAYER = {
+    "player_id": "demo-player",
+    "ranking": 842,
+    "recent_matches": [
+        {"date": "2026-08-10", "result": "L", "round": "R1", "opponent_level": "Challenger"},
+        {"date": "2026-07-28", "result": "L", "round": "R1", "opponent_level": "Challenger"},
+        {"date": "2026-07-12", "result": "W", "round": "QF", "opponent_level": "Futures"},
+    ],
+    "location_pref": "San Diego, CA",
 }
 
 
@@ -71,14 +87,14 @@ def clear_tournaments() -> None:
     _mutate(op)
 
 
-def _upsert(collection: str, items: list[dict]) -> None:
-    """Upsert by `id` so re-running a search doesn't duplicate rows."""
+def _upsert(collection: str, items: list[dict], key: str = "id") -> None:
+    """Upsert by `key` so re-running a search/write doesn't duplicate rows."""
 
     def op(data: dict) -> None:
         rows = data[collection]
-        by_id = {r.get("id"): i for i, r in enumerate(rows)}
+        by_id = {r.get(key): i for i, r in enumerate(rows)}
         for item in items:
-            iid = item.get("id")
+            iid = item.get(key)
             if iid in by_id:
                 rows[by_id[iid]] = item
             else:
@@ -86,6 +102,37 @@ def _upsert(collection: str, items: list[dict]) -> None:
                 by_id[iid] = len(rows) - 1
 
     _mutate(op)
+
+
+# ---------------------------------------------------------------------------
+# players — stands in for the Firestore `players` collection the tournament
+# agent reads (ranking + recent match history to reason about form).
+# ---------------------------------------------------------------------------
+
+def list_players() -> list[dict]:
+    return _load()["players"]
+
+
+def get_player(player_id: str) -> dict | None:
+    """Look a player up by id, falling back to the demo profile for the
+    demo/unset id so the tournament agent always has something to reason
+    about. Returns None for a genuinely unknown, non-demo id."""
+    player = next(
+        (p for p in _load()["players"] if p.get("player_id") == player_id),
+        None,
+    )
+    if player:
+        return player
+    if player_id in (None, "", "demo-player", "demo_player", "demo_player_id"):
+        return dict(_DEMO_PLAYER)
+    return None
+
+
+def save_player(fields: dict) -> dict:
+    player = dict(fields)
+    player.setdefault("player_id", uuid.uuid4().hex)
+    _upsert("players", [player], key="player_id")
+    return player
 
 
 def add_tournaments(new_tournaments: list[dict]) -> None:
@@ -145,8 +192,21 @@ def list_bookings(user_id: str | None = None) -> list[dict]:
 def add_booking(fields: dict) -> dict:
     booking = dict(fields)
     booking.setdefault("id", uuid.uuid4().hex)
+    booking.setdefault("reminder_sent", False)
     _mutate(lambda data: data["bookings"].append(booking))
     return booking
+
+
+def mark_reminder_sent(booking_id: str) -> None:
+    """Flip reminder_sent=True on one booking. Used by orchestrator's
+    reminder_job so a re-run the same day doesn't double-send."""
+
+    def op(data: dict) -> None:
+        for b in data["bookings"]:
+            if b.get("id") == booking_id:
+                b["reminder_sent"] = True
+
+    _mutate(op)
 
 
 def add_search_history(entry: dict) -> None:

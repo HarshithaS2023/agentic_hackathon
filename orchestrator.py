@@ -200,15 +200,123 @@ def register_player_for_tournament(
     return record
 
 
+def book_hotel(
+    user_id: str,
+    hotel_id: str,
+    hotel_name: str,
+    address: str,
+    check_in: str,
+    check_out: str,
+    total_price: float,
+) -> dict:
+    """Write a confirmed hotel booking and send its receipt.
+
+    Only call this after handle_confirmation_reply returned
+    result="confirmed" with action_type="confirm_hotel".
+
+    Args:
+        user_id: The player's id (phone number).
+        hotel_id: Id of the hotel option being booked.
+        hotel_name: Display name for the receipt.
+        address: Hotel address string.
+        check_in: ISO date of check-in.
+        check_out: ISO date of check-out.
+        total_price: Total stay price in USD.
+
+    Returns:
+        The created booking record.
+    """
+    booking_id = str(uuid.uuid4())
+    email_sent = _send_email_receipt(user_id, hotel_name, check_in, address)
+    data_store.add_booking(
+        {
+            "id": booking_id,
+            "user_id": user_id,
+            "type": "hotel",
+            "title": hotel_name,
+            "date": check_in,
+            "location": address,
+            "status": "confirmed",
+            "confirmation": booking_id[:8],
+            "reminder_sent": False,
+            "check_in": check_in,
+            "check_out": check_out,
+            "total_price": total_price,
+        }
+    )
+    return {
+        "booking_id": booking_id,
+        "status": "confirmed",
+        "email_receipt_sent": email_sent,
+        "check_in": check_in,
+        "check_out": check_out,
+    }
+
+
+def book_flight(
+    user_id: str,
+    flight_id: str,
+    airline: str,
+    route: str,
+    depart_time: str,
+    arrive_time: str,
+    price: float,
+) -> dict:
+    """Write a confirmed flight booking and send its receipt.
+
+    Only call this after handle_confirmation_reply returned
+    result="confirmed" with action_type="confirm_flight".
+
+    Args:
+        user_id: The player's id (phone number).
+        flight_id: Id of the flight leg being booked.
+        airline: Operating airline name.
+        route: Human route string, e.g. "SAN → LAX".
+        depart_time: ISO datetime of departure.
+        arrive_time: ISO datetime of arrival.
+        price: Ticket price in USD.
+
+    Returns:
+        The created booking record.
+    """
+    booking_id = str(uuid.uuid4())
+    email_sent = _send_email_receipt(user_id, f"{airline} flight {route}", depart_time, route)
+    data_store.add_booking(
+        {
+            "id": booking_id,
+            "user_id": user_id,
+            "type": "flight",
+            "title": f"{airline} {route}",
+            "date": depart_time,
+            "location": route,
+            "status": "confirmed",
+            "confirmation": booking_id[:8],
+            "reminder_sent": False,
+            "arrive_time": arrive_time,
+            "price": price,
+        }
+    )
+    return {
+        "booking_id": booking_id,
+        "status": "confirmed",
+        "email_receipt_sent": email_sent,
+    }
+
+
 def _add_calendar_event(title: str, date: str, location: str) -> str:
     """Add an event to the player's Google Calendar. Returns the event id."""
-    # TODO: real Google Calendar API call.
-    return f"cal_event_{uuid.uuid4().hex[:8]}"
+    # TODO: real Google Calendar API call (google-api-python-client +
+    # service-account creds). Stubbed to a synthetic id + a log line so the
+    # rest of the confirmation flow is observable end-to-end in dev.
+    event_id = f"cal_event_{uuid.uuid4().hex[:8]}"
+    print(f"[calendar] created {event_id}: {title} on {date} @ {location}")
+    return event_id
 
 
-def _send_email_receipt(user_id: str, tournament_name: str, date: str, location: str) -> bool:
-    """Send a registration receipt email. Returns whether it sent successfully."""
-    # TODO: real SendGrid/SMTP call.
+def _send_email_receipt(user_id: str, item_name: str, date: str, location: str) -> bool:
+    """Send a booking receipt email. Returns whether it sent successfully."""
+    # TODO: real SendGrid/SMTP call. Stubbed to a log line for now.
+    print(f"[email] receipt -> {user_id}: {item_name} ({date}, {location})")
     return True
 
 
@@ -242,6 +350,12 @@ Confirmation flow (you own this, sub-agents never touch it):
     call register_player_for_tournament with the staged context, then
     tell the player it's booked, the receipt is emailed, and it's on
     their calendar.
+  - result="confirmed" and action_type="confirm_hotel" -> call
+    book_hotel with the staged context, then tell the player the room
+    is booked and the receipt is emailed.
+  - result="confirmed" and action_type="confirm_flight" -> call
+    book_flight with the staged context, then tell the player the
+    flight is booked and the receipt is emailed.
   - result="declined" -> acknowledge and stop, do not book anything.
   - result="expired" -> tell the player the confirmation window
     closed and ask if they'd like to redo it.
@@ -260,6 +374,8 @@ rule, not a suggestion.
         set_pending_confirmation,
         handle_confirmation_reply,
         register_player_for_tournament,
+        book_hotel,
+        book_flight,
     ],
 )
 
@@ -274,17 +390,60 @@ root_agent = orchestrator
 # agent since there's no judgment call to make, just a lookup + send.
 # ---------------------------------------------------------------------------
 
-def reminder_job() -> None:
-    """Send "2 days out" reminder texts for upcoming confirmed registrations."""
-    # TODO: replace with a real Firestore query:
-    #   db.collection("registrations")
-    #     .where("status", "==", "confirmed")
-    #     .where("reminder_sent", "==", False)
-    #     .stream()
-    # then filter for tournament_date - now == 2 days, send via Twilio,
-    # and flip reminder_sent = True on each doc. Idempotent by design:
-    # safe to run this job more than once without double-sending.
-    raise NotImplementedError("Wire up Firestore + Twilio send here.")
+REMINDER_LEAD_DAYS = 2
+
+
+def _send_reminder_text(user_id: str, title: str, date: str, location: str) -> bool:
+    """Send the "2 days out" reminder SMS. Returns whether it sent."""
+    # TODO: real Twilio send. Stubbed to a log line for now.
+    print(
+        f"[reminder] -> {user_id}: {title} in {REMINDER_LEAD_DAYS} days "
+        f"({date}, {location})"
+    )
+    return True
+
+
+def reminder_job() -> dict:
+    """Send "2 days out" reminder texts for upcoming confirmed registrations.
+
+    Reads confirmed bookings from data_store (the stand-in for the
+    Firestore `registrations` collection), sends a reminder for any whose
+    date is exactly REMINDER_LEAD_DAYS out and that hasn't been reminded
+    yet, then flips reminder_sent=True on each. Idempotent by design:
+    safe to run more than once a day without double-sending.
+
+    Returns a small summary dict so a cron/Cloud Scheduler caller can log
+    what happened.
+
+    TODO: when Firestore is live this becomes:
+        db.collection("registrations")
+          .where("status", "==", "confirmed")
+          .where("reminder_sent", "==", False).stream()
+    with the same date filter + Twilio send + reminder_sent flip.
+    """
+    today = dt.date.today()
+    checked = 0
+    sent = 0
+    for booking in data_store.list_bookings():
+        if booking.get("status") != "confirmed" or booking.get("reminder_sent"):
+            continue
+        checked += 1
+        raw_date = (booking.get("date") or "")[:10]
+        try:
+            event_date = dt.date.fromisoformat(raw_date)
+        except ValueError:
+            continue
+        if (event_date - today).days != REMINDER_LEAD_DAYS:
+            continue
+        if _send_reminder_text(
+            booking.get("user_id", ""),
+            booking.get("title", "your event"),
+            raw_date,
+            booking.get("location", ""),
+        ):
+            data_store.mark_reminder_sent(booking["id"])
+            sent += 1
+    return {"checked": checked, "reminders_sent": sent}
 
 
 if __name__ == "__main__":

@@ -46,11 +46,15 @@ Data layer notes:
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sys
 from pathlib import Path
 from typing import Literal
 
 from google.adk.agents import Agent
+from google.adk.runners import InMemoryRunner
+from google.adk.tools import google_search
+from google.genai import types as genai_types
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -107,8 +111,20 @@ def get_player_profile(player_id: str) -> dict:
         A dict with 'ranking', 'recent_matches' (list of results with
         opponent level and date), and 'location_pref'.
     """
-    # TODO: replace with a real Firestore read, e.g.
+    # Reads the shared `players` store (data_store.py stands in for the
+    # Firestore `players` collection until GCP credentials are wired up —
+    # swap the body of data_store.get_player for a real
     #   db.collection("players").document(player_id).get().to_dict()
+    # then). Falls back to a demo profile for an unknown id, mirroring the
+    # get_trip() fallback in hotels.py / flights.py so the __main__ smoke
+    # test and un-provisioned players still exercise the full flow.
+    player = data_store.get_player(player_id)
+    if player:
+        return {
+            "ranking": player.get("ranking"),
+            "recent_matches": player.get("recent_matches", []),
+            "location_pref": player.get("location_pref", ""),
+        }
     return {
         "ranking": 842,
         "recent_matches": [
@@ -176,23 +192,93 @@ def search_wider_date_range(location: str, level: str, date_range_days: int = 12
     return search_tournaments(location, level, date_range_days=date_range_days)
 
 
-def find_practice_matches(location: str) -> list[dict]:
+_PRACTICE_FALLBACK = [
+    {"listing_id": "practice-sd-1", "detail": "Open hitting session, Barnes Center, Tue/Thu evenings"},
+    {"listing_id": "practice-sd-2", "detail": "Club ladder practice matches, La Jolla Tennis Club"},
+]
+
+# A search-only helper agent. Unlike USTA/TennisLink tournament data (which
+# tournaments.py is barred from fetching itself — see the module docstring),
+# public hitting sessions / club ladders / "find a hitting partner" boards
+# are fine to look up live, so this stub is wired to Google Search grounding
+# rather than a hardcoded list. It's a separate single-tool agent because
+# Gemini won't combine google_search with function tools or an output_schema
+# in one request (same constraint search.py splits its pipeline around).
+_practice_search_agent = Agent(
+    name="practice_match_search_step",
+    model=MODEL,
+    description="Runs a live Google Search for public practice-match / hitting opportunities near a location.",
+    instruction="""
+Given a location, use google_search to find real, currently-listed ways
+for a competitive tennis player to get practice reps in near it:
+public/open hitting sessions, club ladders, drop-in clinics, adult
+practice groups, or "find a hitting partner" boards.
+
+Reply as a plain-text list, one option per line, each line starting with
+"- " in the form:
+- <venue or group name> — <what it is, schedule if stated> — <URL>
+Only list what the search results actually show. Do not invent venues.
+""",
+    tools=[google_search],
+    output_key="practice_findings",
+)
+
+_PRACTICE_LINE_RE = re.compile(r"^\s*[-*•]\s+(.*\S)")
+
+
+def _parse_practice_lines(text: str) -> list[dict]:
+    """Best-effort scrape of the helper agent's plain-text bullet list."""
+    listings: list[dict] = []
+    for raw in (text or "").splitlines():
+        match = _PRACTICE_LINE_RE.match(raw)
+        if not match:
+            continue
+        detail = match.group(1).strip()
+        if len(detail) < 8:
+            continue
+        listings.append({"listing_id": f"practice-{len(listings) + 1}", "detail": detail})
+    return listings[:5]
+
+
+async def find_practice_matches(location: str) -> list[dict]:
     """Find informal practice-match opportunities near a location.
 
     Used when recent performance suggests the player should rebuild
-    confidence before entering a sanctioned tournament.
+    confidence before entering a sanctioned tournament. Runs a live
+    Google Search (via a dedicated single-tool sub-agent) and parses the
+    results; falls back to a small static list if grounded search is
+    unavailable (e.g. no Vertex credentials) or returns nothing usable.
 
     Args:
         location: City/region to search near.
 
     Returns:
-        A list of practice hitting-partner or practice-match listings.
+        A list of practice hitting-partner or practice-match listings,
+        each a dict with 'listing_id' and 'detail'.
     """
-    # TODO: wire to a real practice-partner board / club API if available.
-    return [
-        {"listing_id": "practice-sd-1", "detail": "Open hitting session, Barnes Center, Tue/Thu evenings"},
-        {"listing_id": "practice-sd-2", "detail": "Club ladder practice matches, La Jolla Tennis Club"},
-    ]
+    try:
+        runner = InMemoryRunner(agent=_practice_search_agent, app_name="practice_search_dev")
+        session = await runner.session_service.create_session(
+            app_name="practice_search_dev", user_id="tournament_agent"
+        )
+        message = genai_types.Content(
+            role="user",
+            parts=[genai_types.Part(
+                text=f"Find tennis practice matches and open hitting sessions near {location}."
+            )],
+        )
+        chunks: list[str] = []
+        async for event in runner.run_async(
+            user_id="tournament_agent", session_id=session.id, new_message=message
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        chunks.append(part.text)
+        listings = _parse_practice_lines("".join(chunks))
+    except Exception:  # noqa: BLE001 — grounded search is best-effort here
+        listings = []
+    return listings or [dict(item) for item in _PRACTICE_FALLBACK]
 
 
 # ---------------------------------------------------------------------------
