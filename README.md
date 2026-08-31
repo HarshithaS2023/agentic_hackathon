@@ -13,6 +13,8 @@ booking flow.
 
 <img width="1099" height="737" alt="image" src="https://github.com/user-attachments/assets/b94fa2fd-0221-453a-be93-661b9530e60b" />
 
+<img width="405" height="724" alt="image" src="https://github.com/user-attachments/assets/19b55661-be95-48f8-a1f3-1a693a9b29ac" />
+
 
 
 ## How it's built
