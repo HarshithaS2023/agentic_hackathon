@@ -66,6 +66,9 @@ class FlightLeg(BaseModel):
     depart_time: str = Field(description="ISO datetime")
     arrive_time: str = Field(description="ISO datetime")
     layovers: int
+    booking_url: str = Field(
+        description="External link where the traveler can book this flight"
+    )
     recommendation_note: str = Field(
         description="Why this flight fits, given timing, budget, and layovers"
     )
@@ -86,6 +89,12 @@ class FlightRecommendationResponse(BaseModel):
         description=(
             "Whether at least one outbound option arrives before "
             "first_event_datetime minus arrival_buffer_minutes"
+        )
+    )
+    round_trip_cost: str = Field(
+        description=(
+            "Total cost of the recommended outbound + return legs, formatted "
+            "with a leading $ and two decimals, e.g. '$483.00'"
         )
     )
     options: list[FlightLeg] = Field(
@@ -192,9 +201,20 @@ def search_flights(
                 "depart_time": depart.isoformat(),
                 "arrive_time": arrive.isoformat(),
                 "layovers": layovers,
+                "booking_url": _google_flights_url(
+                    origin_airport, destination_airport, depart
+                ),
             }
         )
     return results
+
+
+def _google_flights_url(origin: str, destination: str, depart: datetime) -> str:
+    """Build a Google Flights search link a traveler can click to book."""
+    from urllib.parse import quote
+
+    query = f"Flights from {origin} to {destination} on {depart.date().isoformat()}"
+    return f"https://www.google.com/travel/flights?q={quote(query)}"
 
 
 def search_alternate_airports(
@@ -238,6 +258,7 @@ def search_alternate_airports(
             "arrive_time": arrive.isoformat(),
             "layovers": 0,
             "arrival_airport": "BUR",
+            "booking_url": _google_flights_url(origin_airport, "BUR", depart),
         },
     ]
 
@@ -288,8 +309,15 @@ Steps:
    this tells the orchestrator to flag a real scheduling risk to the
    athlete rather than silently booking a flight that risks a missed
    check-in.
-8. Return at most 3 ranked options per direction. Never invent flights,
-   prices, airlines, or times that didn't come from a tool call.
+8. Set round_trip_cost to the sum of the cheapest recommended outbound
+   option's price and the cheapest recommended return option's price,
+   formatted as a string with a leading $ and two decimals (e.g.
+   '$483.00'). Compute this from the actual prices returned by the
+   tools — never estimate or round independently.
+9. Return at most 3 ranked options per direction, each carrying the
+   booking_url returned by the tool call unchanged. Never invent
+   flights, prices, airlines, links, or times that didn't come from a
+   tool call.
 """,
     tools=[get_trip_requirements, search_flights, search_alternate_airports],
     output_schema=FlightRecommendationResponse,

@@ -169,7 +169,7 @@ export default function OrcaSearch({ onReloadTrips }) {
               <span className="orca-row-body">
                 <span className="orca-row-name">{r.name || r.title || 'Result'}</span>
                 <span className="orca-row-meta">
-                  {[r.sport, r.level, r.location, r.price].filter(Boolean).join(' · ')}
+                  {[r.sport, r.level, r.location, r.price && `$${r.price}`].filter(Boolean).join(' · ')}
                 </span>
               </span>
               {r.source_url && (

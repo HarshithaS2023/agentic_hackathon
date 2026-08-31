@@ -206,9 +206,13 @@ def _run_flight_search(user_id: str, tournament: dict, origin: str) -> tuple[lis
                 "name": f"{leg['airline']} ({leg['direction']})",
                 "level": "Nonstop" if leg["layovers"] == 0 else f"{leg['layovers']} layover(s)",
                 "location": f"{trip['origin_airport']} → {trip['destination_airport']}",
+                "source_url": leg.get("booking_url", ""),
             }
         )
-    return rows, output.get("reasoning", "")
+    round_trip_cost = output.get("round_trip_cost", "")
+    reasoning = output.get("reasoning", "")
+    summary = f"Round trip: {round_trip_cost} — {reasoning}" if round_trip_cost else reasoning
+    return rows, summary
 
 
 def _run_hotel_search(user_id: str, tournament: dict) -> tuple[list[dict], str]:
