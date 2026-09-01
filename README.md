@@ -17,6 +17,15 @@ booking flow.
 
 
 
+## Architecture
+
+[ORCA System Map](https://claude.ai/code/artifact/f9d2c1a4-d9d9-49c5-bc63-eb082d6de386) —
+an interactive diagram of the request path from the dashboard through the
+Flask API to the orchestrator's tool-calling sub-agents and the
+search-grounding agent, including which integrations are live vs. still
+stubbed. (Private by default — share it from the page's share menu if you
+want this link to work for others.)
+
 ## How it's built
 
 - **Orchestrator agent** ([orchestrator.py](orchestrator.py)) — a Google ADK
